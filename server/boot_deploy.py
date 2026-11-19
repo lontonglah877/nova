@@ -30,6 +30,26 @@ def log(m):
     print("[nova] " + str(m), flush=True)
 
 
+def load_env():
+    """Botkeep writes panel variables to .env; os.environ may not carry them."""
+    for cand in (ROOT / ".env", ROOT.parent / ".env"):
+        try:
+            if not cand.exists():
+                continue
+            for raw in cand.read_text(encoding="utf-8", errors="ignore").splitlines():
+                line = raw.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                k, v = line.split("=", 1)
+                k = k.strip()
+                v = v.strip().strip('"').strip("'")
+                if k and v and not os.environ.get(k):
+                    os.environ[k] = v
+            log("env loaded from " + str(cand))
+        except Exception as exc:
+            log("env read failed: %r" % (exc,))
+
+
 def sh(cmd, **kw):
     log("$ " + " ".join(str(c) for c in cmd))
     try:
@@ -134,6 +154,7 @@ def config(src_root):
 
 def main():
     log("start; python " + sys.version.split()[0])
+    load_env()
     for p in ("/proc/meminfo",):
         try:
             log(pathlib.Path(p).read_text().splitlines()[0].strip())
