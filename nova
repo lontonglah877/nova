@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# Launcher for the NOVA CLI (Linux/macOS/Git-Bash).
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+export NOVA_HOME="${NOVA_HOME:-$HOME/nova}"
+exec python3 "$DIR/app/nova/cli.py" "$@"

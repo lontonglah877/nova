@@ -1,0 +1,17 @@
+# NOVA
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+_environments/
+data/
+backups/
+*.sqlite
+*.db
+*.log
+server.env
+.env
+_bundle.zip
+.hermes/
+.DS_Store

@@ -1,0 +1,12 @@
+[project]
+name = "nova"
+version = "0.1.0"
+description = "NOVA — personal AI assistant core (stdlib only)"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.optional-dependencies]
+pdf = ["pypdf>=4.0"]
+
+[tool.nova]
+entry = "app/nova/cli.py"
