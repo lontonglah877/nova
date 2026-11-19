@@ -38,9 +38,11 @@ def run(cmd, **kw):
 
 
 def clone():
-    if (REPO / "app" / "nova" / "cli.py").exists():
-        log("source already present")
-        return True
+    # GitHub sync may already have placed the repo one level above this file.
+    for cand in (ROOT, ROOT.parent):
+        if (cand / "app" / "nova" / "cli.py").exists():
+            log("source already present at " + str(cand))
+            return True
     url = os.environ.get("NOVA_REPO") or DEFAULT_REPO
     shutil.rmtree(REPO, ignore_errors=True)
     if run(["git", "clone", "--depth", "1", url, str(REPO)]) != 0:
