@@ -10,7 +10,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from datetime import timedelta
+from datetime import timedelta, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -201,9 +201,11 @@ class TestReminders(NovaCase):
         self.assertEqual(life.reminder_due(self.conn, {})["count"], 1)
 
     def test_timezone_conversion(self):
-        res = life.reminder_add(self.conn, {
-            "title": "tz", "due_at": "2026-11-20T07:00:00+07:00"})
-        self.assertTrue(res["due"].startswith("2026-11-20 07:00"))
+        # a future instant expressed in +07:00 must round-trip to the same WIB wall clock
+        local = (now_utc() + timedelta(hours=2)).astimezone(timezone(timedelta(hours=7)))
+        stamp = local.replace(microsecond=0).isoformat()
+        res = life.reminder_add(self.conn, {"title": "tz", "due_at": stamp})
+        self.assertTrue(res["due"].startswith(local.strftime("%Y-%m-%d %H:%M")))
 
 
 class TestLearning(NovaCase):
