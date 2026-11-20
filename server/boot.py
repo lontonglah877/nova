@@ -1,23 +1,25 @@
 #!/usr/bin/env python3
-"""NOVA bootstrap v4 for Botkeep (Python 3.14 via uv).
+"""NOVA bootstrap v5 for Botkeep (Python 3.14 via uv).
 
 Alur:
   1. muat variabel panel (.env) dari ROOT / ROOT.parent
   2. unduh sumber NOVA (zip GitHub) bila belum ada
   3. unduh sumber Hermes (tarball commit yang sama dengan laptop)
-  4. pasang uv, lalu Python 3.14 (stdlib standalone) ke ROOT/tools
-  5. venv 3.14 + `uv pip install -e` sumber Hermes (editable, bukan wheel)
+  4. pasang uv, lalu Python 3.14 standalone ke ROOT/tools
+  5. venv 3.14 (.venv314) + `uv pip install -e` sumber Hermes (editable)
   6. Node + WhatsApp bridge (npm) + pulihkan sesi pairing
   7. tulis config.yaml + hermes-home/.env
   8. jalankan gateway di foreground
 
 Catatan penting:
   - hermes-agent MENOLAK build wheel/sdist (setup.py guard). Satu-satunya
-    jalur resmi adalah editable install, karena itu v3 (pip install <path>)
-    selalu gagal dan jatuh ke PyPI 0.19.0.
+    jalur resmi adalah editable install, karena itu `pip install <path>`
+    selalu gagal dan jatuh ke PyPI 0.19.0 (versi lama -> perilaku beda).
   - pyproject Hermes hanya mendeklarasikan dependensi untuk python 3.14
     (marker `python_version >= '3.14'`). Di 3.13 dependensi inti tidak
     terpasang sama sekali -> venv harus 3.14.
+  - venv baru memakai nama .venv314 supaya venv lama (.venv) tidak dihapus
+    saat runtime masih berjalan.
 
 Env panel yang dipakai:
   NOVA_GEMINI_KEY (wajib, rahasia) - boleh juga GEMINI_API_KEY
@@ -35,8 +37,8 @@ import zipfile
 
 ROOT = pathlib.Path(__file__).resolve().parent
 HOME = ROOT / "hermes-home"
-VENV = ROOT / ".venv"
-STAMP = ROOT / ".deps-v4"
+VENV = ROOT / ".venv314"
+STAMP = ROOT / ".deps-v5"
 SRC = ROOT / "_nova_src"
 TOOLS = ROOT / "tools"
 HSRC = ROOT / "_hermes_src"
@@ -48,6 +50,9 @@ FALLBACK_PKG = "hermes-agent[messaging]==0.19.0"
 NODE_VER = "v22.14.0"
 PY_VER = "3.14"
 UV_BASE = "https://github.com/astral-sh/uv/releases/latest/download/"
+# Hanya yang dipakai jalur WhatsApp; extra [messaging] penuh menarik
+# discord.py[voice]/telegram/slack yang tidak diperlukan di server ini.
+EXTRA_PKGS = ["aiohttp==3.14.5", "qrcode==7.4.2", "brotlicffi==1.2.1.0"]
 
 WA_ZIP = ROOT / "nova-wa-session.zip"
 BASE = "https://generativelanguage.googleapis.com/v1beta/openai/"
@@ -55,7 +60,7 @@ MODEL = "gemini-3-flash-preview"
 OWNER = "6281216092537"
 BOT_NUMBER = "628197654120"
 
-UA = {"User-Agent": "nova-bootstrap/4"}
+UA = {"User-Agent": "nova-bootstrap/5"}
 
 
 def log(m):
@@ -82,9 +87,8 @@ def load_env():
             log("env gagal dibaca: %r" % (exc,))
 
 
-def sh(cmd, cwd=None, env=None, quiet=False):
-    if not quiet:
-        log("$ " + " ".join(str(c) for c in cmd))
+def sh(cmd, cwd=None, env=None):
+    log("$ " + " ".join(str(c) for c in cmd))
     try:
         return subprocess.call([str(c) for c in cmd], cwd=str(cwd or ROOT), env=env)
     except Exception as exc:
@@ -95,14 +99,15 @@ def sh(cmd, cwd=None, env=None, quiet=False):
 def download(url, dest):
     log("unduh " + url)
     req = urllib.request.Request(url, headers=UA)
-    with urllib.request.urlopen(req, timeout=180) as r, open(dest, "wb") as f:
+    with urllib.request.urlopen(req, timeout=300) as r, open(dest, "wb") as f:
         shutil.copyfileobj(r, f)
     log("  -> " + dest.name + " (" + str(dest.stat().st_size) + " byte)")
     return dest
 
 
-def extract_zip(path, dest):
-    shutil.rmtree(dest, ignore_errors=True)
+def extract_zip(path, dest, wipe=True):
+    if wipe:
+        shutil.rmtree(dest, ignore_errors=True)
     dest.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(path) as zf:
         zf.extractall(dest)
@@ -129,9 +134,10 @@ def fetch_nova():
     if found:
         log("sumber NOVA sudah ada: " + str(found))
         return found
-    if (SRC / "nova-main" / "app" / "nova" / "cli.py").exists():
-        log("sumber NOVA sudah ada: " + str(SRC / "nova-main"))
-        return SRC / "nova-main"
+    for child in sorted(SRC.iterdir()) if SRC.exists() else []:
+        if (child / "app" / "nova" / "cli.py").exists():
+            log("sumber NOVA sudah ada: " + str(child))
+            return child
     z = ROOT / "_src.zip"
     try:
         download(NOVA_ZIP, z)
@@ -181,11 +187,9 @@ def uv_bin():
     if found:
         log("uv ditemukan: " + found)
         return pathlib.Path(found)
-    tgt = TOOLS / "uv-" + _arch_tag()
-    exe = tgt / "uv"
-    if exe.exists():
-        log("uv siap: " + str(exe))
-        return exe
+    for cand in sorted(TOOLS.glob("uv*/uv")) if TOOLS.exists() else []:
+        log("uv siap: " + str(cand))
+        return cand
     if platform.system().lower() != "linux":
         log("uv unduhan otomatis hanya untuk linux")
         return None
@@ -210,22 +214,30 @@ def uv_bin():
     return None
 
 
+def is_py314(vp):
+    try:
+        rc = subprocess.call([str(vp), "-c", "import sys;raise SystemExit(0 if sys.version_info[:2]==(3,14) else 1)"],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return rc == 0
+    except Exception:
+        return False
+
+
 def venv_python(uv):
     """venv harus 3.14: dependensi Hermes hanya dideklarasikan untuk 3.14."""
     vp = VENV / "bin" / "python"
     if vp.exists():
-        rc = subprocess.call([str(vp), "-c", "import sys;raise SystemExit(0 if sys.version_info[:2]==(3,14) else 1)"],
-                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        if rc == 0:
+        if is_py314(vp):
+            log("venv 3.14 sudah ada")
             return vp
-        log("venv lama bukan 3.14; dibuat ulang")
+        log("venv ada tapi bukan 3.14; dibuat ulang")
         shutil.rmtree(VENV, ignore_errors=True)
     if uv:
-        sh([uv, "python", "install", PY_VER])
+        if sh([uv, "python", "install", PY_VER]) != 0:
+            log("uv python install gagal (mungkin sudah ada)")
         if sh([uv, "venv", "--python", PY_VER, "--seed", str(VENV)]) != 0:
             log("uv venv gagal")
-            return None
-        if vp.exists():
+        if vp.exists() and is_py314(vp):
             log("venv 3.14 siap: " + str(vp))
             return vp
     log("venv 3.14 tidak tersedia; pakai python sistem " + sys.version.split()[0])
@@ -239,34 +251,40 @@ def deps(hsrc, uv):
     if STAMP.exists() and (VENV / "bin" / "hermes").exists():
         log("dependensi siap (stamp)")
         return vp
-    if not (hsrc and uv):
-        log("sumber Hermes/uv tidak ada; fallback PyPI")
-        if sh([vp, "-m", "pip", "install", "--no-cache-dir", "-q", FALLBACK_PKG]) == 0:
-            STAMP.write_text(str(int(time.time())))
-        return vp
-    env = dict(os.environ)
-    env["HERMES_NIX_BUILD"] = "0"
-    sh([uv, "pip", "install", "--python", str(vp), "--no-cache", "-q",
-        "-e", str(hsrc) + "[messaging]"], env=env)
-    ok = subprocess.call([str(vp), "-c", "import hermes_cli"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    if ok == 0:
+    ed_ok = False
+    if hsrc and uv:
+        env = dict(os.environ)
+        env.pop("HERMES_NIX_BUILD", None)
+        # editable: build_editable tidak memicu guard bdist_wheel/sdist
+        if sh([uv, "pip", "install", "--python", str(vp), "-q", "-e", str(hsrc)], env=env) == 0:
+            if sh([uv, "pip", "install", "--python", str(vp), "-q"] + EXTRA_PKGS, env=env) == 0:
+                ed_ok = True
+        if ed_ok:
+            rc = subprocess.call([str(vp), "-c", "import hermes_cli, qrcode"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            if rc != 0:
+                log("editable terpasang tapi import gagal")
+                ed_ok = False
+        if not ed_ok and (VENV / "bin" / "python").exists():
+            log("coba pip editable")
+            if sh([vp, "-m", "pip", "install", "--no-cache-dir", "-q", "-e", str(hsrc)]) == 0:
+                ed_ok = True
+    if ed_ok:
         STAMP.write_text(str(int(time.time())))
-        log("hermes-agent (editable 3.14) terpasang")
-        return vp
-    log("install editable gagal; coba pip editable")
-    if sh([vp, "-m", "pip", "install", "--no-cache-dir", "-q", "-e", str(hsrc) + "[messaging]"]) == 0:
-        STAMP.write_text(str(int(time.time())))
-        log("hermes-agent (pip editable) terpasang")
+        log("hermes-agent editable (3.14) terpasang")
         return vp
     log("editable gagal; fallback PyPI " + FALLBACK_PKG)
     if sh([vp, "-m", "pip", "install", "--no-cache-dir", "-q", FALLBACK_PKG]) == 0:
         STAMP.write_text(str(int(time.time())))
+        log("hermes-agent PyPI terpasang (versi lama)")
     return vp
 
 
 def node_bin():
     """Cari node; unduh bila belum ada. Kembalikan (node_exe, npm_cli_js)."""
-    cands = [shutil.which("node"), str(TOOLS / "node" / "bin" / "node")]
+    cands = [shutil.which("node")]
+    if TOOLS.exists():
+        cands += [str(p) for p in sorted(TOOLS.glob("node*/bin/node"))]
+        cands += [str(TOOLS / "node" / "bin" / "node")]
     for cand in cands:
         if cand and pathlib.Path(cand).exists():
             p = pathlib.Path(cand)
@@ -358,7 +376,7 @@ def restore_session():
     for t in targets:
         shutil.rmtree(t, ignore_errors=True)
         t.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copytree(root, t)
+        shutil.copytree(root, t, ignore=shutil.ignore_patterns("tmp*"))
         try:
             os.chmod(t, 0o700)
         except Exception:
