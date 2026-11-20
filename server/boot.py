@@ -52,7 +52,7 @@ PY_VER = "3.14"
 UV_BASE = "https://github.com/astral-sh/uv/releases/latest/download/"
 # Hanya yang dipakai jalur WhatsApp; extra [messaging] penuh menarik
 # discord.py[voice]/telegram/slack yang tidak diperlukan di server ini.
-EXTRA_PKGS = ["aiohttp==3.14.5", "qrcode==7.4.2", "brotlicffi==1.2.1.0"]
+EXTRA_PKGS = ["aiohttp", "qrcode", "brotlicffi"]
 
 WA_ZIP = ROOT / "nova-wa-session.zip"
 BASE = "https://generativelanguage.googleapis.com/v1beta/openai/"
