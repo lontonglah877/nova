@@ -1,14 +1,23 @@
 #!/usr/bin/env python3
-"""NOVA bootstrap v3 for Botkeep (Python 3.13).
+"""NOVA bootstrap v4 for Botkeep (Python 3.14 via uv).
 
 Alur:
   1. muat variabel panel (.env) dari ROOT / ROOT.parent
   2. unduh sumber NOVA (zip GitHub) bila belum ada
-  3. unduh sumber Hermes (tarball commit yang sama dengan laptop) + venv + pip
-  4. siapkan Node (unduh bila belum ada) + WhatsApp bridge (npm)
-  5. pulihkan sesi WhatsApp yang sudah dipairing (nova-wa-session.zip)
-  6. tulis config.yaml + hermes-home/.env
-  7. jalankan gateway di foreground
+  3. unduh sumber Hermes (tarball commit yang sama dengan laptop)
+  4. pasang uv, lalu Python 3.14 (stdlib standalone) ke ROOT/tools
+  5. venv 3.14 + `uv pip install -e` sumber Hermes (editable, bukan wheel)
+  6. Node + WhatsApp bridge (npm) + pulihkan sesi pairing
+  7. tulis config.yaml + hermes-home/.env
+  8. jalankan gateway di foreground
+
+Catatan penting:
+  - hermes-agent MENOLAK build wheel/sdist (setup.py guard). Satu-satunya
+    jalur resmi adalah editable install, karena itu v3 (pip install <path>)
+    selalu gagal dan jatuh ke PyPI 0.19.0.
+  - pyproject Hermes hanya mendeklarasikan dependensi untuk python 3.14
+    (marker `python_version >= '3.14'`). Di 3.13 dependensi inti tidak
+    terpasang sama sekali -> venv harus 3.14.
 
 Env panel yang dipakai:
   NOVA_GEMINI_KEY (wajib, rahasia) - boleh juga GEMINI_API_KEY
@@ -27,15 +36,18 @@ import zipfile
 ROOT = pathlib.Path(__file__).resolve().parent
 HOME = ROOT / "hermes-home"
 VENV = ROOT / ".venv"
-STAMP = ROOT / ".deps-v3"
+STAMP = ROOT / ".deps-v4"
 SRC = ROOT / "_nova_src"
 TOOLS = ROOT / "tools"
+HSRC = ROOT / "_hermes_src"
 
 NOVA_ZIP = "https://github.com/lontonglah877/nova/archive/refs/heads/main.zip"
 HERMES_COMMIT = "c314285f077"
 HERMES_TGZ = "https://github.com/NousResearch/hermes-agent/archive/" + HERMES_COMMIT + ".tar.gz"
 FALLBACK_PKG = "hermes-agent[messaging]==0.19.0"
 NODE_VER = "v22.14.0"
+PY_VER = "3.14"
+UV_BASE = "https://github.com/astral-sh/uv/releases/latest/download/"
 
 WA_ZIP = ROOT / "nova-wa-session.zip"
 BASE = "https://generativelanguage.googleapis.com/v1beta/openai/"
@@ -43,7 +55,7 @@ MODEL = "gemini-3-flash-preview"
 OWNER = "6281216092537"
 BOT_NUMBER = "628197654120"
 
-UA = {"User-Agent": "nova-bootstrap/3"}
+UA = {"User-Agent": "nova-bootstrap/4"}
 
 
 def log(m):
@@ -70,8 +82,9 @@ def load_env():
             log("env gagal dibaca: %r" % (exc,))
 
 
-def sh(cmd, cwd=None, env=None):
-    log("$ " + " ".join(str(c) for c in cmd))
+def sh(cmd, cwd=None, env=None, quiet=False):
+    if not quiet:
+        log("$ " + " ".join(str(c) for c in cmd))
     try:
         return subprocess.call([str(c) for c in cmd], cwd=str(cwd or ROOT), env=env)
     except Exception as exc:
@@ -96,7 +109,6 @@ def extract_zip(path, dest):
 
 
 def extract_tar(path, dest):
-    shutil.rmtree(dest, ignore_errors=True)
     dest.mkdir(parents=True, exist_ok=True)
     with tarfile.open(path) as tf:
         try:
@@ -117,6 +129,9 @@ def fetch_nova():
     if found:
         log("sumber NOVA sudah ada: " + str(found))
         return found
+    if (SRC / "nova-main" / "app" / "nova" / "cli.py").exists():
+        log("sumber NOVA sudah ada: " + str(SRC / "nova-main"))
+        return SRC / "nova-main"
     z = ROOT / "_src.zip"
     try:
         download(NOVA_ZIP, z)
@@ -135,54 +150,117 @@ def fetch_nova():
 
 def fetch_hermes():
     """Unduh sumber Hermes (commit sama dengan laptop) - tanpa git."""
-    marker = ROOT / "_hermes_src"
-    if marker.exists():
-        for child in sorted(marker.iterdir()):
+    if HSRC.exists():
+        for child in sorted(HSRC.iterdir()):
             if (child / "hermes_cli").is_dir():
                 log("sumber Hermes sudah ada: " + child.name)
                 return child
     t = ROOT / "_hermes.tar.gz"
     try:
         download(HERMES_TGZ, t)
-        extract_tar(t, marker)
+        extract_tar(t, HSRC)
         t.unlink()
     except Exception as exc:
         log("unduh Hermes gagal: %r" % (exc,))
         return None
-    for child in sorted(marker.iterdir()):
+    for child in sorted(HSRC.iterdir()):
         if (child / "hermes_cli").is_dir():
             log("Hermes diekstrak: " + child.name)
             return child
     return None
 
 
-def venv_python():
+def _arch_tag():
+    machine = platform.machine().lower()
+    return "aarch64" if machine in ("aarch64", "arm64") else "x86_64"
+
+
+def uv_bin():
+    """Cari/unduh biner uv (tidak butuh pip)."""
+    found = shutil.which("uv")
+    if found:
+        log("uv ditemukan: " + found)
+        return pathlib.Path(found)
+    tgt = TOOLS / "uv-" + _arch_tag()
+    exe = tgt / "uv"
+    if exe.exists():
+        log("uv siap: " + str(exe))
+        return exe
+    if platform.system().lower() != "linux":
+        log("uv unduhan otomatis hanya untuk linux")
+        return None
+    name = "uv-" + _arch_tag() + "-unknown-linux-gnu"
+    t = ROOT / (name + ".tar.gz")
+    try:
+        download(UV_BASE + name + ".tar.gz", t)
+        extract_tar(t, TOOLS)
+        t.unlink()
+    except Exception as exc:
+        log("unduh uv gagal: %r" % (exc,))
+        return None
+    for cand in (TOOLS / name / "uv", TOOLS / "uv"):
+        if cand.exists():
+            try:
+                os.chmod(cand, 0o755)
+            except Exception:
+                pass
+            log("uv siap: " + str(cand))
+            return cand
+    log("uv tidak ditemukan setelah ekstrak")
+    return None
+
+
+def venv_python(uv):
+    """venv harus 3.14: dependensi Hermes hanya dideklarasikan untuk 3.14."""
     vp = VENV / "bin" / "python"
     if vp.exists():
-        return vp
-    if sh([sys.executable, "-m", "venv", str(VENV)]) != 0:
-        log("venv gagal; pakai python sistem")
-        return pathlib.Path(sys.executable)
-    return VENV / "bin" / "python" if (VENV / "bin" / "python").exists() else pathlib.Path(sys.executable)
+        rc = subprocess.call([str(vp), "-c", "import sys;raise SystemExit(0 if sys.version_info[:2]==(3,14) else 1)"],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if rc == 0:
+            return vp
+        log("venv lama bukan 3.14; dibuat ulang")
+        shutil.rmtree(VENV, ignore_errors=True)
+    if uv:
+        sh([uv, "python", "install", PY_VER])
+        if sh([uv, "venv", "--python", PY_VER, "--seed", str(VENV)]) != 0:
+            log("uv venv gagal")
+            return None
+        if vp.exists():
+            log("venv 3.14 siap: " + str(vp))
+            return vp
+    log("venv 3.14 tidak tersedia; pakai python sistem " + sys.version.split()[0])
+    return pathlib.Path(sys.executable)
 
 
-def deps(hsrc):
-    vp = venv_python()
+def deps(hsrc, uv):
+    vp = venv_python(uv)
+    if not vp:
+        return None
     if STAMP.exists() and (VENV / "bin" / "hermes").exists():
         log("dependensi siap (stamp)")
         return vp
-    sh([vp, "-m", "pip", "install", "--no-cache-dir", "-q", "--upgrade", "pip", "setuptools", "wheel"])
-    rc = 1
-    if hsrc:
-        rc = sh([vp, "-m", "pip", "install", "--no-cache-dir", "-q", str(hsrc) + "[messaging]"])
-    if rc != 0:
-        log("install dari sumber gagal; fallback PyPI")
-        rc = sh([vp, "-m", "pip", "install", "--no-cache-dir", "-q", FALLBACK_PKG])
-    if rc == 0:
+    if not (hsrc and uv):
+        log("sumber Hermes/uv tidak ada; fallback PyPI")
+        if sh([vp, "-m", "pip", "install", "--no-cache-dir", "-q", FALLBACK_PKG]) == 0:
+            STAMP.write_text(str(int(time.time())))
+        return vp
+    env = dict(os.environ)
+    env["HERMES_NIX_BUILD"] = "0"
+    sh([uv, "pip", "install", "--python", str(vp), "--no-cache", "-q",
+        "-e", str(hsrc) + "[messaging]"], env=env)
+    ok = subprocess.call([str(vp), "-c", "import hermes_cli"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    if ok == 0:
         STAMP.write_text(str(int(time.time())))
-        log("hermes-agent terpasang")
-    else:
-        log("pip gagal rc=" + str(rc))
+        log("hermes-agent (editable 3.14) terpasang")
+        return vp
+    log("install editable gagal; coba pip editable")
+    if sh([vp, "-m", "pip", "install", "--no-cache-dir", "-q", "-e", str(hsrc) + "[messaging]"]) == 0:
+        STAMP.write_text(str(int(time.time())))
+        log("hermes-agent (pip editable) terpasang")
+        return vp
+    log("editable gagal; fallback PyPI " + FALLBACK_PKG)
+    if sh([vp, "-m", "pip", "install", "--no-cache-dir", "-q", FALLBACK_PKG]) == 0:
+        STAMP.write_text(str(int(time.time())))
     return vp
 
 
@@ -202,8 +280,7 @@ def node_bin():
     t = ROOT / (name + ".tar.xz")
     try:
         download(url, t)
-        with tarfile.open(t) as tf:
-            tf.extractall(TOOLS)
+        extract_tar(t, TOOLS)
         t.unlink()
     except Exception as exc:
         log("unduh node gagal: %r" % (exc,))
@@ -363,7 +440,11 @@ def main():
         log("sumber NOVA tidak ada; berhenti")
         return 2
     hsrc = fetch_hermes()
-    vp = deps(hsrc)
+    uv = uv_bin()
+    vp = deps(hsrc, uv)
+    if not vp:
+        log("venv/dependensi tidak siap; berhenti")
+        return 3
     node_exe, npm_cli = node_bin()
     bridge(hsrc, node_exe, npm_cli)
     restore_session()
@@ -383,7 +464,7 @@ def main():
     if key:
         env["NOVA_GEMINI_KEY"] = key
 
-    exe = vp.parent / "hermes"
+    exe = VENV / "bin" / "hermes"
     cmd = [exe, "gateway", "run"] if exe.exists() else [vp, "-m", "hermes_cli", "gateway", "run"]
     log("menjalankan gateway: " + " ".join(str(c) for c in cmd))
     log("nomor bot: " + BOT_NUMBER + " | penerima: " + OWNER)
