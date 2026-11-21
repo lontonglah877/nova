@@ -403,6 +403,17 @@ const scheduleReconnect = createReconnectScheduler(() => startSocket());
 const getWAVersion = createVersionResolver(fetchLatestBaileysVersion);
 
 async function startSocket() {
+  // Tutup socket lama sebelum membuat yang baru. Dua socket aktif dengan creds yang
+  // sama membuat WhatsApp menendang yang lama (statusCode 440 "replaced"), lalu
+  // reconnect membuat socket ketiga — flap tak berujung dan bridge tidak pernah sehat.
+  if (sock) {
+    const lama = sock;
+    sock = null;
+    try {
+      await lama.end(undefined);
+    } catch {}
+    await new Promise((r) => setTimeout(r, 600));
+  }
   const { state, saveCreds } = await useMultiFileAuthState(SESSION_DIR);
   const version = await getWAVersion();
 

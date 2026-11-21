@@ -1,0 +1,10 @@
+# Sengaja kosong.
+#
+# Hermes TIDAK dipasang lewat file ini. Hermes harus di-install editable dari
+# sumber (server/boot.py melakukannya dengan uv) karena:
+#   * wheel PyPI hermes-agent tidak membawa scripts/whatsapp-bridge (bridge.js
+#     hilang -> WhatsApp mati),
+#   * versi PyPI saat ini (0.19.0) menolak Python 3.14 dan berperilaku beda
+#     dengan mesin yang sudah diuji.
+#
+# Kalau Botkeep menawarkan "install requirements", biarkan kosong ini lolos.

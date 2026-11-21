@@ -1,0 +1,17 @@
+[Unit]
+Description=NOVA - personal AI assistant (WhatsApp)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/nova
+ExecStart=/opt/nova/.venv/bin/python main.py
+Restart=always
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+# Isi kunci lewat file env, jangan tulis di unit ini:
+EnvironmentFile=/opt/nova/nova.env
+
+[Install]
+WantedBy=multi-user.target

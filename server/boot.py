@@ -24,6 +24,7 @@ Catatan penting:
 Env panel yang dipakai:
   NOVA_GEMINI_KEY (wajib, rahasia) - boleh juga GEMINI_API_KEY
 """
+import base64
 import os
 import pathlib
 import platform
@@ -349,14 +350,40 @@ def bridge(hsrc, node_exe, npm_cli):
     return (dst / "node_modules").exists()
 
 
-def restore_session():
-    """Pulihkan creds WhatsApp hasil pairing ke dua lokasi yang dipakai Hermes."""
+def restore_session() -> bool:
+    """Pulihkan creds WhatsApp hasil pairing ke dua lokasi yang dipakai Hermes.
+
+    Tiga sumber, berurutan:
+      1. sesi sudah ada di disk server,
+      2. `NOVA_WA_SESSION_B64` (secret Botkeep: base64 dari zip creds),
+      3. `nova-wa-session.zip` di root (untuk deploy manual).
+    Tanpa salah satu dari itu, bridge akan meminta pairing QR di Console.
+    """
     targets = (HOME / "whatsapp" / "session", HOME / "platforms" / "whatsapp" / "session")
     if any((t / "creds.json").exists() for t in targets):
         log("sesi WhatsApp sudah ada di server")
         return True
+
+    blob = os.environ.get("NOVA_WA_SESSION_B64", "").strip()
+    if blob:
+        tmp = ROOT / "_wa_tmp"
+        try:
+            shutil.rmtree(tmp, ignore_errors=True)
+            tmp.mkdir(parents=True, exist_ok=True)
+            data = base64.b64decode(blob)
+            zpath = ROOT / "_wa_session.zip"
+            zpath.write_bytes(data)
+            extract_zip(zpath, tmp)
+            zpath.unlink()
+            log("sesi WhatsApp dari NOVA_WA_SESSION_B64 (" + str(len(data)) + " byte)")
+        except Exception as exc:
+            log("NOVA_WA_SESSION_B64 tidak terbaca: %r" % (exc,))
+            blob = ""
+        if blob:
+            return _install_session(tmp, targets)
+
     if not WA_ZIP.exists():
-        log("nova-wa-session.zip tidak ada; WhatsApp butuh pairing QR")
+        log("sesi WhatsApp belum ada; bridge akan minta pairing QR di Console")
         return False
     tmp = ROOT / "_wa_tmp"
     try:
@@ -364,6 +391,10 @@ def restore_session():
     except Exception as exc:
         log("ekstrak sesi gagal: %r" % (exc,))
         return False
+    return _install_session(tmp, targets)
+
+
+def _install_session(tmp, targets) -> bool:
     root = tmp
     if not (root / "creds.json").exists():
         for p in root.iterdir():
@@ -371,7 +402,8 @@ def restore_session():
                 root = p
                 break
     if not (root / "creds.json").exists():
-        log("creds.json tidak ada di dalam zip")
+        log("creds.json tidak ada di dalam sumber sesi")
+        shutil.rmtree(tmp, ignore_errors=True)
         return False
     for t in targets:
         shutil.rmtree(t, ignore_errors=True)
@@ -384,6 +416,53 @@ def restore_session():
         log("sesi dipulihkan ke " + str(t))
     shutil.rmtree(tmp, ignore_errors=True)
     return True
+
+
+def pair_if_needed(node_exe, npm_cli) -> bool:
+    """Pairing sekali di Console panel kalau creds server belum ada.
+
+    Bridge dijalankan mode `--pair-only` dengan stdout diwarisi, jadi QR
+    tercetak langsung di Console Botkeep dan bisa dipindai dari HP. Setelah
+    creds tersimpan, fungsi ini keluar dan gateway memakai sesi itu.
+    """
+    sesi = HOME / "whatsapp" / "session"
+    if (sesi / "creds.json").exists():
+        return True
+    if not node_exe:
+        log("node tidak ada; pairing tidak bisa dijalankan")
+        return False
+    script = HOME / "scripts" / "whatsapp-bridge" / "bridge.js"
+    if not script.exists():
+        script = ROOT / "server" / "whatsapp-bridge" / "bridge.js"
+    if not script.exists():
+        log("bridge.js tidak ada; pairing dilewati")
+        return False
+    sesi.mkdir(parents=True, exist_ok=True)
+    env = dict(os.environ)
+    env["PATH"] = str(node_exe.parent) + os.pathsep + env.get("PATH", "")
+    log("=" * 62)
+    log("PAIRING WHATSAPP: pindai QR di bawah dengan WhatsApp > Perangkat tertaut")
+    log("=" * 62)
+    cmd = [str(node_exe), str(script), "--port", "3000", "--session", str(sesi),
+           "--mode", "bot", "--pair-only"]
+    timeout = int(os.environ.get("NOVA_PAIR_WAIT", "240") or 240)
+    try:
+        proc = subprocess.Popen(cmd, cwd=str(script.parent), env=env)
+        try:
+            proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            log("pairing melewati batas %d detik; lanjut tanpa WhatsApp" % timeout)
+            try:
+                proc.terminate()
+                proc.wait(timeout=10)
+            except Exception:
+                proc.kill()
+    except Exception as exc:
+        log("pairing gagal: %r" % (exc,))
+        return False
+    ok = (sesi / "creds.json").exists()
+    log("creds WhatsApp: " + ("ADA" if ok else "BELUM ADA"))
+    return ok
 
 
 def api_key():
@@ -466,6 +545,8 @@ def main():
     node_exe, npm_cli = node_bin()
     bridge(hsrc, node_exe, npm_cli)
     restore_session()
+    if not pair_if_needed(node_exe, npm_cli):
+        log("PERINGATAN: WhatsApp belum tertaut; bot akan jalan tanpa WhatsApp sampai pairing selesai")
     key = api_key()
     config(nova_root, key)
 
@@ -483,7 +564,11 @@ def main():
         env["NOVA_GEMINI_KEY"] = key
 
     exe = VENV / "bin" / "hermes"
-    cmd = [exe, "gateway", "run"] if exe.exists() else [vp, "-m", "hermes_cli", "gateway", "run"]
+    if exe.exists():
+        cmd = [exe, "gateway", "run"]
+    else:
+        # hermes_cli tidak punya __main__.py: entry point-nya hermes_cli.main:main
+        cmd = [vp, "-c", "from hermes_cli.main import main; main()", "gateway", "run"]
     log("menjalankan gateway: " + " ".join(str(c) for c in cmd))
     log("nomor bot: " + BOT_NUMBER + " | penerima: " + OWNER)
     try:

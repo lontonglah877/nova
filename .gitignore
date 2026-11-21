@@ -15,3 +15,18 @@ server.env
 _bundle.zip
 .hermes/
 .DS_Store
+.venv314/
+tools/
+_nova_src/
+_hermes_src/
+_wa_tmp/
+_wa_session.zip
+nova-wa-session.zip
+
+# dependencies & artefak rahasia
+node_modules/
+server/whatsapp-bridge/node_modules/
+nova-wa-session.b64
+NOVA-QR.png
+*.png
+server/web.py
