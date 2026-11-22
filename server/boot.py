@@ -22,7 +22,8 @@ Catatan penting:
     saat runtime masih berjalan.
 
 Env panel yang dipakai:
-  NOVA_GEMINI_KEY (wajib, rahasia) - boleh juga GEMINI_API_KEY
+  NOVA_ROUTER_KEY (disarankan, rahasia) - kunci zrouter: DeepSeek + Claude Haiku
+  NOVA_GEMINI_KEY (opsional, rahasia) - kunci Google AI Studio sebagai cadangan
 """
 import base64
 import os
@@ -56,8 +57,14 @@ UV_BASE = "https://github.com/astral-sh/uv/releases/latest/download/"
 EXTRA_PKGS = ["aiohttp", "qrcode", "brotlicffi"]
 
 WA_ZIP = ROOT / "nova-wa-session.zip"
-BASE = "https://generativelanguage.googleapis.com/v1beta/openai/"
-MODEL = "gemini-3-flash-preview"
+# Penyedia utama: zrouter (OpenAI-compatible), model DeepSeek.
+BASE = "https://api.zrouter.dev/v1"
+MODEL = "deepseek-v4.1-flash"
+# Cadangan 1: model lain di akun zrouter yang sama.
+FALLBACK_ROUTER_MODEL = "claude-haiku-5.5"
+# Cadangan 2: Google AI Studio (kunci terpisah) kalau saldo zrouter habis.
+GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta/openai/"
+GEMINI_MODEL = "gemini-3.1-flash-lite"
 OWNER = "6281216092537"
 BOT_NUMBER = "628197654120"
 
@@ -465,49 +472,89 @@ def pair_if_needed(node_exe, npm_cli) -> bool:
     return ok
 
 
-def api_key():
-    for k in ("NOVA_GEMINI_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY"):
+def api_key(*names):
+    for k in names:
         v = os.environ.get(k, "").strip()
         if v:
             return v
     return ""
 
 
-def config(nova_root, key):
+def router_key():
+    """Kunci zrouter (penyedia utama, DeepSeek + Claude Haiku)."""
+    return api_key("NOVA_ROUTER_KEY", "ZROUTER_API_KEY", "ROUTER_API_KEY")
+
+
+def gemini_key():
+    """Kunci Google AI Studio (cadangan terakhir)."""
+    return api_key("NOVA_GEMINI_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY")
+
+
+def config(nova_root, rkey, gkey):
     for d in ("", "skills", "logs", "sessions", "cron", "memories"):
         (HOME / d).mkdir(parents=True, exist_ok=True)
-    (HOME / "config.yaml").write_text(
-        "model:\n"
-        "  default: " + MODEL + "\n"
-        "  provider: custom\n"
-        "  base_url: " + BASE + "\n"
-        "  api_mode: chat_completions\n"
-        "  key_env: NOVA_GEMINI_KEY\n"
-        "providers:\n"
-        "  custom:\n"
-        "    name: google-ai-studio\n"
-        "    base_url: " + BASE + "\n"
-        "    model: " + MODEL + "\n"
-        "    key_env: NOVA_GEMINI_KEY\n"
-        "agent:\n"
-        "  max_turns: 200\n"
-        "terminal:\n"
-        "  backend: local\n"
-        "  timeout: 180\n"
-        "memory:\n"
-        "  memory_enabled: true\n"
-        "  user_profile_enabled: true\n",
-        encoding="utf-8")
     lines = [
-        "NOVA_GEMINI_KEY=" + key,
+        "model:",
+        "  default: " + MODEL,
+        "  provider: custom",
+        "  base_url: " + BASE,
+        "  api_mode: chat_completions",
+        "  key_env: NOVA_ROUTER_KEY",
+        "providers:",
+        "  custom:",
+        "    name: zrouter",
+        "    base_url: " + BASE,
+        "    model: " + MODEL,
+        "    api_mode: chat_completions",
+        "    key_env: NOVA_ROUTER_KEY",
+    ]
+    if gkey:
+        lines += [
+            "  google:",
+            "    name: google-ai-studio",
+            "    base_url: " + GEMINI_BASE,
+            "    model: " + GEMINI_MODEL,
+            "    api_mode: chat_completions",
+            "    key_env: NOVA_GEMINI_KEY",
+        ]
+    # Rantai cadangan: model lain di zrouter, lalu Gemini.
+    lines += [
+        "fallback_model:",
+        "  - provider: custom",
+        "    model: " + FALLBACK_ROUTER_MODEL,
+        "    base_url: " + BASE,
+        "    key_env: NOVA_ROUTER_KEY",
+    ]
+    if gkey:
+        lines += [
+            "  - provider: custom",
+            "    model: " + GEMINI_MODEL,
+            "    base_url: " + GEMINI_BASE,
+            "    key_env: NOVA_GEMINI_KEY",
+        ]
+    lines += [
+        "agent:",
+        "  max_turns: 200",
+        "terminal:",
+        "  backend: local",
+        "  timeout: 180",
+        "memory:",
+        "  memory_enabled: true",
+        "  user_profile_enabled: true",
+    ]
+    (HOME / "config.yaml").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    env_lines = [
+        "NOVA_ROUTER_KEY=" + rkey,
+        "NOVA_GEMINI_KEY=" + gkey,
         "WHATSAPP_ENABLED=true",
         "WHATSAPP_MODE=bot",
         "WHATSAPP_ALLOWED_USERS=" + OWNER,
         "HERMES_HOME=" + str(HOME),
         "PYTHONUNBUFFERED=1",
     ]
-    (HOME / ".env").write_text("\n".join(lines) + "\n", encoding="utf-8")
-    log("config.yaml + .env ditulis (kunci: " + ("ada" if key else "KOSONG") + ")")
+    (HOME / ".env").write_text("\n".join(env_lines) + "\n", encoding="utf-8")
+    log("config.yaml + .env ditulis (zrouter: " + ("ada" if rkey else "KOSONG")
+        + ", gemini: " + ("ada" if gkey else "KOSONG") + ")")
     if nova_root:
         sdir = nova_root / "skills"
         if sdir.exists():
@@ -547,8 +594,9 @@ def main():
     restore_session()
     if not pair_if_needed(node_exe, npm_cli):
         log("PERINGATAN: WhatsApp belum tertaut; bot akan jalan tanpa WhatsApp sampai pairing selesai")
-    key = api_key()
-    config(nova_root, key)
+    rkey = router_key()
+    gkey = gemini_key()
+    config(nova_root, rkey, gkey)
 
     env = dict(os.environ)
     env["HERMES_HOME"] = str(HOME)
@@ -560,8 +608,10 @@ def main():
     if node_exe:
         path_bits.insert(0, str(node_exe.parent))
     env["PATH"] = os.pathsep.join(path_bits) + os.pathsep + env.get("PATH", "")
-    if key:
-        env["NOVA_GEMINI_KEY"] = key
+    if rkey:
+        env["NOVA_ROUTER_KEY"] = rkey
+    if gkey:
+        env["NOVA_GEMINI_KEY"] = gkey
 
     exe = VENV / "bin" / "hermes"
     if exe.exists():
